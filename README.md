@@ -3,14 +3,41 @@
 Terraform configuration for deploying Azure Kubernetes Service (AKS) across multiple regions, with Azure Traffic Manager demonstrating both Active/Active and Active/Passive architectures.
 
 ## Architecture
-┌─────────────────────┐
-                │   Traffic Manager    │
-                │  (Weighted/Priority) │
-                └──────┬───────┬──────┘
-                       │       │
-          ┌────────────┘       └────────────┐
-          ▼                                  ▼
+
+```text
+                    +---------------------+
+                    |   Traffic Manager   |
+                    | (Weighted/Priority) |
+                    +------+-------+------+
+                           |       |
+              +------------+       +------------+
+              v                                 v
+   +---------------------+          +---------------------+
+   |   eastus            |          |   westus2           |
+   |  VNet 10.10.0.0/16  |          |  VNet 10.20.0.0/16  |
+   |  +---------------+  |          |  +---------------+  |
+   |  | AKS + ACR     |  |          |  | AKS + ACR     |  |
+   |  | Public LB     |  |          |  | Public LB     |  |
+   |  | Internal LB   |  |          |  | Internal LB   |  |
+   |  +---------------+  |          |  +---------------+  |
+   +---------------------+          +---------------------+
+```
+
 ## Structure
+
+```text
+├── main.tf              # Root module — workspace-aware region config
+├── traffic-manager.tf   # Traffic Manager profile + endpoints (default workspace only)
+├── variables.tf
+├── outputs.tf
+├── providers.tf
+├── modules/
+│   ├── networking/      # VNet, subnet, NSG
+│   ├── acr/             # Azure Container Registry (globally-unique naming)
+│   └── aks/             # AKS cluster, AcrPull + Network Contributor role assignments
+└── k8s-app/             # Demo app manifests (public + internal LoadBalancer services)
+```
+
 ## Multi-Region via Workspaces
 
 Each Terraform workspace maps to a region through a `region_config` lookup:
@@ -18,8 +45,8 @@ Each Terraform workspace maps to a region through a `region_config` lookup:
 ```hcl
 locals {
   region_config = {
-    eastus  = { location = "eastus",  vnet_address_space = ["10.10.0.0/16"], ... }
-    westus2 = { location = "westus2", vnet_address_space = ["10.20.0.0/16"], ... }
+    eastus  = { location = "eastus",  vnet_address_space = ["10.10.0.0/16"] }
+    westus2 = { location = "westus2", vnet_address_space = ["10.20.0.0/16"] }
   }
   cfg = local.region_config[terraform.workspace]
 }
@@ -45,7 +72,7 @@ terraform apply -var="tm_routing_method=Weighted"
 terraform apply -var="tm_routing_method=Priority"
 ```
 
-**Failover drill** (tested): with Priority routing, scaling the primary region's deployment to 0 caused Traffic Manager health probes to mark it degraded; DNS failed over to the standby region in ~90 seconds (probe interval 30s × 3 tolerated failures). Restoring the primary triggered automatic failback.
+**Failover drill (tested):** with Priority routing, scaling the primary region's deployment to 0 caused Traffic Manager health probes to mark it degraded; DNS failed over to the standby region in ~90 seconds (probe interval 30s x 3 tolerated failures). Restoring the primary triggered automatic failback.
 
 Key trade-off: Traffic Manager is **DNS-based** — failover speed is bounded by probe interval + DNS TTL + client caching. Azure Front Door (anycast L7 proxy) fails over faster and adds WAF/caching, at higher cost and complexity.
 
